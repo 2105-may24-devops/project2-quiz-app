@@ -1,225 +1,70 @@
-# Phase 5: Eventual Consistency
+# Building a Microservice Application
 
-In this phase we will leverage [Apache Kafka](https://kafka.apache.org/intro) as a message broker to achieve eventual consistency for the multiple instances of our flashcard-service. Apache Kafka will allow us to setup topics for each of our services. Each service will be both a consumer and producer, so that every instance of the service can both send and receive messages to/from other instances. In this example we will be achieving eventual consistency across instances of a single domain, but we can also achieve it cross-domain as well.
+## Purpose
 
-The end result of this phase will be provided for comparison.
+This tutorial will cover converting a basic monolithic Spring Boot application into a microservices application. It will then address common issues faced by microservice applications by leveraging the [Spring Cloud Netflix Stack](https://spring.io/projects/spring-cloud-netflix). The monolithic version of the application will be provided as a starting point. This example will span multiple phases, which can be found in the corresponding folders.
 
-### Prerequisites
+### Getting Started: Prerequisites
 
-* Download [Apache Kafka](https://www.apache.org/dyn/closer.cgi?path=/kafka/2.5.0/kafka_2.12-2.5.0.tgz)
-
-![Download Kafka Image](../images/KafkaDownload.PNG)
-
-* Extract Archive to Documents Folder
-  * Will need to extract twice
-* Rename folder to just `kafka`
-
-![Extract Kafka Image](../images/KafkaExtracted.PNG)
-
-## Step 1: Start Zookeeper and Kafka
-
-1. Open 2 separate PowerShell Windows in the `kafka/bin/windows/` folder
-  * Most systems can Shift Right Click in a folder to open PowerShell
-
-2. Run `.\zookeeper-server-start.bat ..\..\config\zookeeper.properties` in the first PowerShell Window
-
-3. Run `.\kafka-server-start.bat ..\..\config\server.properties` in the second PowerShell Window
-
-Note: Make sure to leave *both* PowerShell Windows open
-
-The kafka server will be started at `localhost:9092`
-
-## Step 2: Add Kafka Dependency
-
-Edit the starters for both flashcard-service and flashcard-service2 and add the `Spring for Apache Kafka` Dependency
-
-## Step 3: Configure Properties
-
-Add the below snippet to the `flashcard.properties` file in the Centralized Configuration Repository:
-
-```properties
-# Configure Kafka Consumer
-spring.kafka.consumer.bootstrap-servers=localhost:9092
-spring.kafka.consumer.group-id=group-id
-spring.kafka.consumer.auto-offset-reset=earliest
-spring.kafka.consumer.properties.spring.json.trusted.packages=*
-spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
-spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.JsonDeserializer
-
-# Configure Kafka Producer
-spring.kafka.producer.bootstrap-servers=localhost:9092
-spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
-spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
+* Obtain the starting application by cloning this repository
+```bash
+git clone https://gitlab.com/revature_training/microservices-team.git
 ```
+The starting project is located at `microservices-team/microservices-standard-examples/example0/initial/`
 
-## Step 4: Create Flashcard Topic
+* You will need to have an IDE, we recommend [Spring Tool Suite](https://spring.io/tools)
 
-In order to send/receive messages, there must be a topic. This can be created manually.
+* You will need [Java 8](https://www.oracle.com/java/technologies/javase/javase-jdk8-downloads.html) installed
 
-Open a *third* PowerShell Window in the same folder as Step 1.
+* You will need [Docker](https://docs.docker.com/get-docker/)
+  * Note that you will need Hyper-V enabled, which has several hardware specification requirements listed [here](https://docs.docker.com/docker-for-windows/install/#system-requirements)
 
-Run `.\kafka-topics.bat --create --zookeeper localhost:2181 --topic flashcard --replication-factor 1 --partitions 1`
+* OPTIONAL: For ease of developing model classes, we use [Lombok](https://projectlombok.org/download)
 
-## Step 5: Create FlashcardChangeEvent
+Note: All Lombok annotations can be replaced with auto-generated code snippets
 
-In order to send/reveive concise messages, we will create a `FlashcardChangeEvent` class that will contain the timestamp, operation, and corresponding Flashcard that is relevant to the message. This will allow us to identify messages based on the hashcode of the event object. We can track the events and prevent 1 instance from re-processing the message that it just sent out.
+The downloaded executable must be applied to the IDE in use, just direct it to the Spring Tool Suite installation directory, and can be applied to multiple IDEs at once, such as shown below.
+![Image of the lombok executable](./images/lombok.PNG)
+![Image of the lombok executable](./images/lombok-install.PNG)
 
-Perform the following in flashcard-service and then copy the files into flashcard-service2:
+Then make sure to restart the IDE for Lombok to be successfully applied.
 
-1. Create a `com.revature.events` package
-2. Create an Enum called `Operation` and a class called `FlashcardChangeEvent` according to the below snippets:
+## Phase 1: Separate Monolith by Domain
 
-Operation:
-```java
-public enum Operation {
-  CREATE, UPDATE, DELETE
-}
-```
+We will start off by separating the application into multiple smaller services that are each responsible for one area of the application.
 
-FlashcardChangeEvent:
-```java
-@Getter @Setter @NoArgsConstructor @AllArgsConstructor @EqualsAndHashCode @ToString
-public class FlashcardChangeEvent {
+In our case, we will have 2 services for the quiz and flashcard services.
 
-  private Flashcard flashcard;
-  private Operation operation;
-  private LocalDateTime timestamp;
-}
-```
+The details can be found in [Phase 1](./phase1).
 
-## Step 6: Create MessageService
+## Phase 2: Manage our Services
 
-We want to create a class that will manage sending and receiving messages according to the operation. We will create a `MessageService` class in the `com.revature.services` package.
+Now that we have our services communicating, we notice that there is a potential issue as we expand our application. We would have to keep track of the location of every service in order for our RestTemplate to communicate with. This is not sustainable, especially if our goal is to use horizontal scaling, where the location of our services will be changing dynamically.
 
-MessageService:
-```java
-@Service
-public class MessageService {
+So we resolve this by levering Service Discovery with [Spring Cloud Consul](https://spring.io/projects/spring-cloud-consul/) and an API Gateway with [Spring Cloud Gateway](https://spring.io/projects/spring-cloud-gateway/).
 
-  private static Set<Integer> eventCache = new HashSet<>();
+The details can be found in [Phase 2](./phase2).
 
-  @Autowired
-  private FlashcardRepository flashcardDao;
+## Phase 3: Circuit-Breaking
 
-  @Autowired
-  private KafkaTemplate<String, FlashcardChangeEvent> kt;
+We are now leveraging Service Discovery and API Gateway to facilitate ease of development from now on. At this point, each team that is responsible for a single microservice are able to continue to implement useful features. From here on, this demonstration will focus on stabilizing the application to fail gracefully in the event of some services not being available.
 
-  public void triggerEvent(FlashcardChangeEvent event) {
-    eventCache.add(event.hashCode());
+We'll accomplish this by Circuit-Breaking with [Netflix Hystrix](https://spring.io/guides/gs/circuit-breaker/) and [OpenFeign](https://spring.io/projects/spring-cloud-openfeign).
 
-    kt.send("flashcard", event);
-  }
+The details can be found in [Phase 3](./phase3).
 
-  @KafkaListener(topics = "flashcard")
-  public void processEvent(FlashcardChangeEvent event) {
-    if(eventCache.contains(event.hashCode())) {
-      eventCache.remove(event.hashCode());
-      return;
-    }
+## Phase 4: Centralized Configuration
 
-    switch(event.getOperation()) {
-    case CREATE:
-    case UPDATE:
-      flashcardDao.save(event.getFlashcard());
-      break;
-    case DELETE:
-      flashcardDao.delete(event.getFlashcard());
-      break;
-    }
-  }
-}
-```
+Our application is now performing well for future development and higher scale. The next bottleneck that we are starting to notice however is the mess of configuration files that the application has across the many services.
 
-## Step 7: Leverage MessageService
+Centralized Configuration can be accomplished with [Spring Cloud Config](https://spring.io/guides/gs/centralized-configuration/).
 
-Now that we have a service to handle all of the logic for sending and receiving messages, we will update out `FlashcardController` to leverage these.
+The details can be found in [Phase 4](./phase4).
 
-Update the `FlashcardController` according to the below snippet:
+## Phase 5: Eventual Consistency
 
-```java
-@Autowired
-MessageService messageService;
+The last feature we'd like to add to our Microservice application is Eventual Consistency in order to have very efficient scaling as we service more and more requests at a time. Instead of purchasing a more powerful server simply to send the same data in response, we'll choose to perform data replication with eventual consistency. This way we can horizontally scale our databases as well as our services.
 
-  @PostMapping
-  public ResponseEntity<Flashcard> insert(@RequestBody Flashcard flashcard) {
-    int id = flashcard.getId();
+We'll achieve Eventual Consistency with [Apache Kafka](https://kafka.apache.org/intro).
 
-    if(id != 0) {
-      return ResponseEntity.badRequest().build();
-    }
-
-    messageService.triggerEvent(
-        new FlashcardChangeEvent(flashcard, Operation.CREATE, LocalDateTime.now()));
-
-    flashcardDao.save(flashcard);
-    return ResponseEntity.status(201).body(flashcard);
-  }
-
-  @DeleteMapping("/{id}")
-  public ResponseEntity<Flashcard> delete(@PathVariable("id") int id) {
-    Optional<Flashcard> option = flashcardDao.findById(id);
-
-    if(option.isPresent()) {
-      messageService.triggerEvent(
-          new FlashcardChangeEvent(option.get(), Operation.DELETE, LocalDateTime.now()));
-
-      flashcardDao.delete(option.get());
-      return ResponseEntity.accepted().body(option.get());
-    }
-
-    return ResponseEntity.notFound().build();
-  }
-```
-
-Now when you launch all of the microservices, you will see that the 2 instances of the flashcard-service will no longer be out of sync. When you send a POST request to `localhost:8080/flashcard` to create a new Flashcard, that operation will be sent to the other instance to be replicated.
-
-When you now send multiple GET requests to `localhost:8080/flashcard`, you should see that they will *eventually* synchronize (it is actually very quick).
-
-## Troubleshooting
-
-Note: The Kafka Server might stop with an error similar to:
-
-```log
-[2020-07-12 19:50:38,024] WARN [ReplicaManager broker=0] Stopping serving replicas in dir C:\tmp\kafka-logs (kafka.server.ReplicaManager)
-[2020-07-12 19:50:38,073] ERROR Failed to clean up log for __consumer_offsets-13 in dir C:\tmp\kafka-logs due to IOException (kafka.server.LogDirFailureChannel)
-java.nio.file.FileSystemException: C:\tmp\kafka-logs\__consumer_offsets-13\00000000000000000000.timeindex.cleaned: The process cannot access the file because it is being used by another process.
-
-        at sun.nio.fs.WindowsException.translateToIOException(WindowsException.java:86)
-        at sun.nio.fs.WindowsException.rethrowAsIOException(WindowsException.java:97)
-        at sun.nio.fs.WindowsException.rethrowAsIOException(WindowsException.java:102)
-        at sun.nio.fs.WindowsFileSystemProvider.implDelete(WindowsFileSystemProvider.java:269)
-        at sun.nio.fs.AbstractFileSystemProvider.deleteIfExists(AbstractFileSystemProvider.java:108)
-        at java.nio.file.Files.deleteIfExists(Files.java:1165)
-        at kafka.log.Log$.deleteFileIfExists(Log.scala:2546)
-        at kafka.log.LogSegment$.deleteIfExists(LogSegment.scala:669)
-        at kafka.log.LogCleaner$.createNewCleanedSegment(LogCleaner.scala:435)
-        at kafka.log.Cleaner.cleanSegments(LogCleaner.scala:547)
-        at kafka.log.Cleaner.$anonfun$doClean$6(LogCleaner.scala:519)
-        at kafka.log.Cleaner.doClean(LogCleaner.scala:518)
-        at kafka.log.Cleaner.clean(LogCleaner.scala:492)
-        at kafka.log.LogCleaner$CleanerThread.cleanLog(LogCleaner.scala:361)
-        at kafka.log.LogCleaner$CleanerThread.cleanFilthiestLog(LogCleaner.scala:334)
-        at kafka.log.LogCleaner$CleanerThread.tryCleanFilthiestLog(LogCleaner.scala:314)
-        at kafka.log.LogCleaner$CleanerThread.doWork(LogCleaner.scala:303)
-        at kafka.utils.ShutdownableThread.run(ShutdownableThread.scala:96)
-[2020-07-12 19:50:38,076] WARN [ReplicaManager broker=0] Broker 0 stopped fetcher for partitions  and stopped moving logs for partitions  because they are in the failed log directory C:\tmp\kafka-logs. (kafka.server.ReplicaManager)
-[2020-07-12 19:50:38,080] WARN Stopping serving logs in dir C:\tmp\kafka-logs (kafka.log.LogManager)
-[2020-07-12 19:50:38,089] ERROR Shutdown broker because all log dirs in C:\tmp\kafka-logs have failed (kafka.log.LogManager)
-```
-
-If this occurs, perform the following:
-
-1. Edit the `server.properties` file in the `kafka/config/` folder
-  * Change the `log.dirs` property to something else, such as `log.dirs=\tmp\kafka\kafka-test-logs`
-2. Restart kafka server with `.\kafka-server-start.bat ..\..\config\server.properties`
-
-
-You may also occasionally want to restart both Zookeeper and Kafka. In which case, first shut down Kafka with `CTRL - C` in the PowerShell Window that is running Kafka, and then shutdown Zookeeper in the same way. Then restart them with the commands used in Step 1.
-
-## Summary
-
-We have solved the long-standing issue of data consistency that arose with our distributed databases. We could have changed the H2 databases in the flashcard-services to both use the same database to avoid this problem entirely. But properly achieving eventual consistency allows for efficiently scaling the number of GET requests you can process at any given time.
-
-Instead of purchasing larger servers for our databases to process more requests per second, we can instead horizontally scale our databases.
-
-Keep in mind that eventual consistency here is performing data replication, so if your particular use-case requires a lot of creation/modification of data, you might not find as much benefit in eventual consistency.
+The details can be found in [Phase 5](./phase5).
