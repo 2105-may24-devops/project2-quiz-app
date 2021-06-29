@@ -1,250 +1,244 @@
-# Phase 3: Circuit-Breaking
+# Phase 4: Centralized Configuration
 
-In this phase we will address the lack of fallback support in our microservice application. One of the primary benefits of Microservices is that they have high availability and resiliency. However, the current state of our application does not provide this. If our flashcard-service fails, then our quiz-service and gateway-service should still be able to gracefully inform  others instead of also failing. We will accomplish that with Netflix Hystrix, which is their solution for Circuit-Breaking. Circuit Breakers allow us to create fallbacks to provide a clear and graceful response when interservice communication fails for any reason. We'll primarily leverage Hystrix through [Spring Cloud Circuit Breaker](https://spring.io/projects/spring-cloud-circuitbreaker).
-
-Additionally, we can convert RestTemplate to use [OpenFeign](https://spring.io/projects/spring-cloud-openfeign) instead, which has some more benefits, including type safety.
+In this phase we will address the growing problem of distributed configuration. We are seeeing that becomes more inconvenient to track all of the configuration for our microservice application. Before our architecture expands too far, we will leverage Centralized Configuration with [Spring Cloud Config](https://spring.io/guides/gs/centralized-configuration/). This will allow us to create a GitHub repository to house all of our configuration. From there, we will create a config-service that will inject the configuration into our services at runtime.
 
 The end result of this phase will be provided for comparison.
 
-# Step 1: Scale instances
+### Prerequisites
 
-We'll start by creating a `/port` endpoint in our flashcard-service that will provide the port that it is running on. Then we will create a copy of our flashcard service and have them running on different ports. In particular, by using `server.port=0`, we will have our services run on random ports from a list of available ports. This should avoid all clashes regardless of how many instances we create.
+You will need an account on any Git Repository Service, such as [GitHub](https://github.com/) or [GitLab](https://gitlab.com/).
 
-Update the `FlashcardController` of the flashcard-service, according to the following snippet:
+## Step 1: Create Configuration Repository
 
-```java
-@Autowired
-Environment env;
+If we want to centralize our configuration, then we need to store it all in a single location, accessible in the cloud. A perfect solution for this is a Git Repository. Any Git Repository will do, but in this demo, we will be using GitHub.
 
-@GetMapping("/port")
-public String getPort() {
-  String serverPort = env.getProperty("local.server.port");
+Create a new Git Repository. You may name it whatever you wish, but ours will simply be named `config`. It is located [here](https://github.com/IkenoXamos/config-2).
 
-  return "Hello, this came from port " + serverPort;
-}
-```
+Normally, we would clone this Git Repository to update the configuration locally, but for this demonstration, we will just modify the repository through GitHub's UI.
 
-Note: The Environment interface should be imported from `org.springframework.core.env`.
+## Step 2: Copy configuration
 
-Now we want to create a copy of our flashcard-service.
-
-Right click the flashcard-service and copy-paste it in the IDE. Name the copy `flashcard-service2`.
-
-Then update the `application.properties` file of `flashcard-service2` according to the following snippet:
+Now we need to make sure that our Config Repository has all of the same configuration that our applications already have. Click on `Add file > Create new file` on GitHub, and create a file named `flashcard.properties`. Then enter the contents according to the below snippet:
 
 ```properties
-server.port=8088
+spring.application.name=flashcard
+
+# Database Credentials
+spring.datasource.url=jdbc:h2:mem:memdb
+spring.datasource.username=sa
+spring.datasource.password=password
+spring.h2.console.enabled=true
+
+# JPA Settings
+spring.jpa.show-sql=false
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
 ```
 
-Note: Since the `spring.application.name` property is still just `flashcard`, Consul will recognize this application as a second instance of the same service.
+It is the same information as our `application.properties`. We should heavily consider not including the database credentials here, as this exposes our username and password publicly. However, since we are only using an in-memory database, we include it here.
 
-This does introduce consistency issues with the H2 databases, but that will be dealt with later in [Phase 5](../phase5).
+Note that we **do not** include the `server.port` property here. This is because for this demonstration, we have a flashcard-service and a flashcard-service2, which need to have different ports. If we included that property here, it would override our changed port. This is something we would do once we containerize our services. At that point, having the same port internal to each docker container is good design.
 
-At this point, we simply need to create an endpoint in our quiz-service to access the `/port` endpoint in our flashcard-services.
+Then perform the same process for each of:
 
-Now we'll just create an endpoint in the `QuizController` that will use our `RestTemplate` to load balance the flashcard-service.
+* `quiz.properties`
+* `gateway.yml`
 
-Update the `QuizController` according to the following snippet:
+`quiz.properties`:
+```properties
+server.port=8090
+spring.application.name=quiz
 
-```java
-@GetMapping("/port")
-public ResponseEntity<String> retrievePort() {
-  String info = this.restTemplate.getForObject("http://flashcard/port", String.class);
+# Database Credentials
+spring.datasource.url=jdbc:h2:mem:memdb
+spring.datasource.username=sa
+spring.datasource.password=password
+spring.h2.console.enabled=true
 
-  return ResponseEntity.ok(info);
-}
+# JPA Settings
+spring.jpa.show-sql=false
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
 ```
 
-Now when we send several GET requests to `http://localhost:8080/quiz/port`, we will see responses from both port `8088` and `8089` in a round-robin fashion.
+`gateway.yml`:
+```yaml
+server:
+  port: 8080
 
-Note: You might initially see an exception in the gateway-service such as:
-
-```java
-com.netflix.zuul.exception.ZuulException:
-  at org.springframework.cloud.netflix.zuul.filters.post.SendErrorFilter.findZuulException(SendErrorFilter.java:118) ~[spring-cloud-netflix-zuul-2.2.3.RELEASE.jar:2.2.3.RELEASE]
-  at org.springframework.cloud.netflix.zuul.filters.post.SendErrorFilter.run(SendErrorFilter.java:78) ~[spring-cloud-netflix-zuul-2.2.3.RELEASE.jar:2.2.3.RELEASE]
-  at com.netflix.zuul.ZuulFilter.runFilter(ZuulFilter.java:117) [zuul-core-1.3.1.jar:1.3.1]
-  at com.netflix.zuul.FilterProcessor.processZuulFilter(FilterProcessor.java:193) [zuul-core-1.3.1.jar:1.3.1]
-  ...
+spring:
+  application.name: gateway
+  cloud:
+    gateway:
+      default-filters:
+      - PrefixPath=/
+      routes:
+      # ============================
+      - id: flashcard
+        uri: lb://flashcard
+        predicates:
+        - Path=/flashcard/**
+        filters:
+        - StripPrefix=1
+        - name: CircuitBreaker
+          args:
+            name: flashcard-fallback
+            fallbackUri: forward:/fallback/flashcard
+      # ============================
+      - id: quiz
+        uri: lb://quiz
+        predicates:
+        - Path=/quiz/**
+        filters:
+        - StripPrefix=1
 ```
 
-Since Spring Cloud Gateway will use Zuul if available on the classpath, so the exception could be zuul specific.
-This just means that the gateway-service is still processing the routes that it obtain from Consul. Wait a few moments and it should be resolved.
+Note: We **do** have the `server.port` property for these services.
 
-## Step 2: Convert RestTemplate to Feign Client
+## Step 3: Create Config Service
 
-Up until this point we have been using `RestTemplate` very well. However, Runtime Exceptions will occur if we ever have a typo in the url with `getForObject`, and the specificity of the `@LoadBalanced` annotation seems unnecessary.
+Now that we have a centralized repository with our configuration, we just need to create our config-service. This service will be responsible for injecting that configuration into our other services.
 
-We instead will be transitioning to use `Feign Clients` from OpenFeign. This will allow us to create interfaces to define all of the endpoints that are available to us, with type-safety.
+Create a new Service named `config-service` with the following Spring Starter Dependencies:
 
-Right click on the quiz-service project and choose `Spring > Edit Starters` and add the `OpenFeign` dependency
+* Spring Boot DevTools
+* Spring Boot Actuator
+* Consul Discovery
+* Config Server
 
-Add the `@EnableFeignClients` annotation to the `QuizServiceApplication` class as shown below:
+Update the `ConfigServiceApplication` according to the below snippet:
 
 ```java
 @EnableDiscoveryClient
-@EnableFeignClients
+@EnableConfigServer
 @SpringBootApplication
-public class QuizServiceApplication {
+public class ConfigServiceApplication {
 
   public static void main(String[] args) {
-    SpringApplication.run(QuizServiceApplication.class, args);
+    SpringApplication.run(ConfigServiceApplication.class, args);
   }
 }
 ```
 
-Note: The `@EnableFeignClients` annotation should be imported from `org.springframework.cloud.openfeign`
+Update the `application.properties` file to be similar to the below:
 
-In quiz-service, create a package called `com.revature.clients` with an interface called `FlashcardClient` according to the below snippet:
+```properties
+server.port=8888
+spring.application.name=config
 
-```java
-@FeignClient(name = "flashcard")
-public interface FlashcardClient {
-
-  @GetMapping
-  public List<Flashcard> findAll();
-
-  @GetMapping("/port")
-  public String retrievePort();
-}
+# Configure Git Repo for Centralized Configuration
+spring.cloud.config.server.git.uri=https://github.com/IkenoXamos/config-2
 ```
 
-The `@FeignClient` annotation will handle all of the complex logic needed to communicate with the flashcard-service through Consul. No implementation class needed, similar to Spring Data JPA. However, if using Hystrix or Resilience4J, fallback methods can be configured here with the `@HystrixCommand` and `@Bulkhead` annotations, respectively. You would create a Fallback class that implements the interface and uses the annotations to declare fallback methods. This process would be used instead of Spring Cloud Circuit Breaker.
+Note: Port 8888 is the default port for Cloud Config Servers and the git URI should be for the repository you created in Step 1
 
-Lastly, in our `QuizController`, we can remove the old RestTemplate and instead use our convenient Feign Client:
+## Step 4: Update Other Services
+Now we need to add the `Config Client` Spring Starter Dependency to the following services:
 
-```java
-@Autowired
-private FlashcardClient flashcardClient;
+* `quiz-service`
+* `flashcard-service`
+* `flashcard-service2`
+* `gateway-service`
 
-@GetMapping("/port")
-public ResponseEntity<String> retrievePort() {
-  String info = flashcardClient.retrievePort();
+At this point we no longer need most of the configuration in the above services. Update each of their `application.properties` or `application.yml` to the below snippets:
 
-  return ResponseEntity.ok(info);
-}
-
-@GetMapping("/cards")
-public ResponseEntity<List<Flashcard>> getCards() {
-  List<Flashcard> all = this.flashcardClient.findAll();
-
-  if(all.isEmpty()) {
-    return ResponseEntity.noContent().build();
-  }
-
-  return ResponseEntity.ok(all);
-}
+quiz-service:
+```properties
+spring.application.name=quiz
+spring.cloud.config.discovery.enabled=true
+spring.cloud.config.discovery.serviceId=config
 ```
 
-Our microservice application will operate in the same manner as it did with `RestTemplate` except now all of the load balancing logic is abstracted away and handled for us. We also have additional type-safety support through the use of Feign Clients.
-
-## Step 3: Circuit-Breaking
-
-At this point, it is becoming more important that we provide some fallbacks in case some of our services are offline. As it currently stands, if you were to send a request to `http://localhost:8080/quiz/cards` while all of the flashcard-services are down, you get an Internal Server Error in the quiz-service:
-
-```java
-com.netflix.client.ClientException: Load balancer does not have available server for client: flashcard
-  at com.netflix.loadbalancer.LoadBalancerContext.getServerFromLoadBalancer(LoadBalancerContext.java:483) ~[ribbon-loadbalancer-2.3.0.jar:2.3.0]
-  at com.netflix.loadbalancer.reactive.LoadBalancerCommand$1.call(LoadBalancerCommand.java:184) ~[ribbon-loadbalancer-2.3.0.jar:2.3.0]
-  at com.netflix.loadbalancer.reactive.LoadBalancerCommand$1.call(LoadBalancerCommand.java:180) ~[ribbon-loadbalancer-2.3.0.jar:2.3.0]
-  at rx.Observable.unsafeSubscribe(Observable.java:10327) ~[rxjava-1.3.8.jar:1.3.8]
+flashcard-service:
+```properties
+server.port=8089
+spring.application.name=flashcard
+spring.cloud.config.discovery.enabled=true
+spring.cloud.config.discovery.serviceId=config
 ```
 
-This is a problem. If our flashcard-service is down, our quiz-service should still be able to function properly. We can accomplish this with the Circuit-Breaker design pattern using [Netflix Hystrix](https://spring.io/guides/gs/circuit-breaker/) or [Resilience4J](https://spring.io/blog/2019/04/16/introducing-spring-cloud-circuit-breaker).
-
-Spring Cloud Circuit Breaker gives us a `CircuitBreakerFactory` class that can be autowired with default configuration. It will leverage Hystrix or Resilience4J, whichever is available. The OpenFeign dependency already includes Hystrix, so no extra steps needed.
-
-We'll use this anywhere in our microservice application where one service communicates with another. At the moment, this is within the quiz-service and gateway-service.
-
-IMPORTANT: The following dependency is needed to be added to the pom.xml in the flashcard-service and the gateway-service for the CircuitBreakerFactory to work:
-
-```
-        <dependency>
-            <groupId>io.reactivex</groupId>
-            <artifactId>rxjava-reactive-streams</artifactId>
-        </dependency>
+flashcard-service2:
+```properties
+server.port=8088
+spring.application.name=flashcard
+spring.cloud.config.discovery.enabled=true
+spring.cloud.config.discovery.serviceId=config
 ```
 
-Now all we have to do is to create fallbacks for each method that relies on interservice communication.
-
-Update the `QuizController` according to the below snippet:
-
-```java
-@Autowired
-private CircuitBreakerFactory<?, ?> cbFactory;
-
-@GetMapping("/port")
-public ResponseEntity<String> retrievePort() {
-  return cbFactory.create("flashcard-port").run(
-    () -> ResponseEntity.ok(flashcardClient.retrievePort()),
-    throwable -> retrievePortFallback());
-}
-
-private ResponseEntity<String> retrievePortFallback() {
-  return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-      .body("flashcard-service is currently unavailable. Please check back later.");
-}
-
-@GetMapping("/cards")
-public ResponseEntity<List<Flashcard>> getCards() {
-  return cbFactory.create("flashcard-cards").run(() -> {
-    List<Flashcard> all = this.flashcardClient.findAll();
-
-    if(all.isEmpty()) {
-      return ResponseEntity.noContent().build();
-    }
-
-    return ResponseEntity.ok(all);
-  }, throwable -> getCardsFallback());
-}
-
-private ResponseEntity<List<Flashcard>> getCardsFallback() {
-  return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-      .build();
-}
+gateway-service:
+```yaml
+spring.application.name: gateway
+spring.cloud.config.discovery.enabled: true
+spring.cloud.config.discovery.serviceId: config
 ```
-Note: `HttpStatus` is imported from `org.springframework.http`
 
-Now our quiz-service fails gracefully for the endpoints that rely on the flashcard-service. We obtain 503 Service Unavailable responses instead of 500 Internal Server Error. This much more clearly communicates to the end user (or perhaps the frontend) what the current situation is.
+These configuration tell each service that the Config Server can be found with Consul named config. Only the 2 flashcard-services have the server.port property included due to the manner in which we are demonstrating multiple instances. Normally those properties are not necessary.
 
-Our gateway-service won't need to use the `CircuitBreakerFactory` class, as Spring Cloud Gateway has built-in support for Fallbacks. We simply need to create a fallback filter in the configuration and an implementation to use instead.
+## Step 5: Launch Services
 
-In gateway-service, create a package called `com.revature.controllers`.
+We should now launch of all our applications. Note that the services should eventually run successfully regardless of order, but a proper order can order be helpful for a smooth launch.
 
-Within that package, create a class called `FallbackController`:
+1. config-service
+2. flashcard-service
+3. flashcard-service2
+4. quiz-service
+5. gateway-service
+
+Our services will receive their configuration, such as port, from the config-service when they initially launch.
+
+## Step 6: Dynamic Configuration
+
+We can create our own properties in the configuration repository and use them in our services. To demonstrate this, we will create a `message` property for the quiz-service and return that property from a `/message` endpoint.
+
+We'll start off by creating a `MessageController` class in the `com.revature.controllers` package of quiz-service according to the below snippet:
 
 ```java
 @RestController
-@RequestMapping("/fallback")
-public class FallbackController {
+@RequestMapping("/message")
+@RefreshScope
+public class MessageController {
 
-  @GetMapping("/flashcard")
-  public ResponseEntity<String> flashcardDown() {
-    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-        .body("flashcard-service is currently unavailable. Please check back later.");
+  @Value("${message}")
+  private String message;
+
+  @GetMapping
+  public String getMessage() {
+    return message;
   }
 }
 ```
+Note that `@Value` annotation was imported from `org.springframework.beans.factory.annotation`
 
-Then update the `application.yml` file according to use the fallback method:
+The `@RefreshScope` annotation will refresh the configuration for this Controller without having to restart the service.
 
-```yaml
-routes:
-# ============================
-- id: flashcard
-  uri: lb://flashcard
-  predicates:
-  - Path=/flashcard/**
-  filters:
-  - StripPrefix=1
-  - name: CircuitBreaker
-    args:
-      name: flashcard-fallback
-      fallbackUri: forward:/fallback/flashcard
+The `@Value` annotation will inject the value of the corresponding property into the field. This allows us to return the property at our `/message` endpoint.
+
+Since we do not have the `message` property in our configuration yet, we must add it in order to allow the quiz-service to successfully launch.
+
+Additionally, we need to expose the actuator refresh endpoint `/actuator/refresh`. We send a POST request to this endpoint to tell the service to refresh its configuration.
+
+In the Config Repository, edit the `quiz.properties` file to include the following:
+
+```properties
+# Actuator Endpoints
+management.endpoints.web.exposure.include=*
+
+# Dynamic Configuration
+message=Hello World!
 ```
+
+Now when we send a GET request to `http://localhost:8080/quiz/message`, we receive the response `Hello World!` as expected.
+
+Now if we change the value of the property in the Config Repository, our application will dynamically provide the new message without needing to restart!
+
+To see this, change the message property to something else, such as `Hello World, this was updated dynamically! Isn't that neat?`.
+
+After approximately 30 seconds, the config-service should obtain the new configuration, which will then be injected into the quiz-service. Then the quiz-service will update its Spring Beans when we send a POST request to `http://localhost:8080/quiz/actuator/refresh`.
+
+You should see the response change from `Hello World!` to `Hello World, this was updated dynamically! Isn't that neat?`.
 
 ## Summary
 
-We have seen how to use OpenFeign instead of RestTemplate for stronger type-safety and better architectural design. After that we introduced the Circuit-Breaker design pattern by leveraging Netflix Hystrix through Spring Cloud Circuit Breaker in order to fail gracefully in case interservice communication breaks down.
+We have increased the maintainability of our application's codebase by centralizing the various configuration files into a single Git Repository. Now we will have centralized versioning for every microservice configuration, with the new ability to dynamically refresh the configuration at runtime.
 
-Next in [Phase 4](../phase4), we will look at centralizing our configuration that is currently spanning across multiple services. We are starting to find that moving between different services in order to change a configuration is becoming increasingly inconvenient. By storing all of our configuration in a GitHub repository, we can maintain a history of all changes to the confguration for every microservice.
+The final issue to tackle in [Phase 5](../phase5) is to resolve database consistency by using a Messaging Queue to synchronize all instances of a service.
