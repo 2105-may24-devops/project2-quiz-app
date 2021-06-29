@@ -1,89 +1,70 @@
-# Phase 1: Separate Monolith by Domain
+# Phase 2: Manage our Services
 
-In this phase we will break apart a monolithic application into multiple smaller services that together form a single microservice application. The application in use is the Quiz Application that has Flashcards for studying different topics, and quizzes that are tied to specific flashcards. The original monolithic application has tight coupling between the Flashcards and Quizzes, so in this phase we will overcome that using RestTemplate for interservice communication.
+In this phase we will address the growing maintenence of tracking/managing our services. In the previous phase we found that it will become increasingly difficult to maintain our application as it grows larger with its current architecture. To resolve this, we will create two additional services, and modify our original services to leverage Service Discovery and an API Gateway.
 
 The end result of this phase will be provided for comparison.
 
-## Step 1: Create New Spring Boot Projects
+## Step 1: Create a Gateway Service
 
-We will need to create 2 Spring Boot Projects, one named quiz-service and the other flashcard-service. They will use the same Spring Start Dependencies as our initial project, which are listed below.
+It was a bit tedious before how we had to switch the port in use when we wanted to switch between our services. We can address this with an API Gateway. This will be an independent service that will receive all of our requests first, and then redirect them to the appropriate service. This will make it much more convenient for end users of our application.
 
-* H2 Database (could be Oracle/PostgreSQL Driver instead)
-* Spring Web
-* Spring Data JPA
-* Lombok
+Create a new Spring Boot Project named gateway-service with the Starter Dependencies listed below:
+
+* Gateway
 * Spring Boot Actuator
 * Spring Boot DevTools
 
-## Step 2: Copy Packages
+Convert the `application.properties` file into `application.yml` by right clicking the `application.properties` file and choosing `Convert .properties to .yaml`.
 
-Now we will copy the corresponding contents from the original quiz-app into each of the quiz-service and flashcard-service.
+Add the following to the `application.yml` file of gateway-service:
 
-Copy the following files into quiz-service:
-* QuizController.java
-* Difficulty.java
-* Flashcard.java
-* Quiz.java
-* Topic.java
-* FlashcardRepository.java
-* QuizRepository.java
-* application.properties
+```yaml
+server:
+  port: 8080
 
-Note: We specifically **do not** include the data.sql file in the quiz-service.
+spring:
+  application.name: gateway
+  cloud:
+    gateway:
+      default-filters:
+      - PrefixPath=/
+      routes:
+      # ============================
+      - id: flashcard
+        uri: http://localhost:8089
+        predicates:
+        - Path=/flashcard/**
+      # ============================
+      - id: quiz
+        uri: http://localhost:8090
+        predicates:
+        - Path=/quiz/**
+```
 
-Copy the following files into flashcard-service:
-* FlashcardController.java
-* Difficulty.java
-* Flashcard.java
-* Quiz.java
-* Topic.java
-* FlashcardRepository.java
-* TopicRepository.java
-* application.properties
-* data.sql
+You might notice that our gateway-service is referencing our flashcard and quiz services on ports 8089 and 8090 respectively. This is because we would prefer to have our gateway-service on port 8080, and so we will have to change where are other 2 services are.
 
-Note: We *do* have some duplicated code because the `QuizController` has a `/quiz/cards` endpoint that is also able to retrieve all flashcards. This means that the quiz-service must also have model classes for the Flashcards. These don't necessarily need to match the models in the flashcard-service. But in this case, they do.
+## Step 2: Update Other Services
 
-## Step 3: Modify Configuration
+We must now update the `application.properties` files for both our flashcard-service and quiz-service to be on ports 8089 and 8090 respectively. Update them according to the below snippet:
 
-In the `application.properties` files, change the beginning of the configuration to match as shown below.
+flashcard-service:
+```properties
+server.port=8089
+```
 
 quiz-service:
 ```properties
-server.port=8080
-spring.application.name=quiz-service
+server.port=8090
 ```
 
-flashcard-service
-```properties
-server.port=8081
-spring.application.name=flashcard-service
-```
+Additionally, we must update our RestTemplate to use our new gateway-service.
 
-In the `data.sql` file in the flashcard-service, remove the INSERT statements for the `quiz` and `quiz_cards` tables, as they are no longer applicable.
-
-## Step 4: Communicate with RestTemplate
-
-At this point the services should function almost perfectly. The only issue is now the services are not properly synchronized. We can send a GET request to `localhost:8081/flashcard` and obtain our flashcards, but the request to `localhost:8080/quiz/cards` no longer works.
-
-To resolve this, we allow the quiz-service to send a request to the flashcard-service to obtain the same information. So we can now remove the `FlashcardRepository` from the quiz-service.
-We accomplish this with RestTemplate. Update the `QuizController` in the quiz-service according to the following code snippet.
+Update the `getCards` method in the `QuizController` according to the below snippet:
 
 ```java
-  // Declare the RestTemplate as a bean to be autowired
-  // This could be xml, java, or annotation config
-  @Bean
-  RestTemplate restTemplate() {
-    return new RestTemplate();
-  }
-
-  @Autowired
-  private RestTemplate restTemplate;
-
   @GetMapping("/cards")
   public ResponseEntity<List<Flashcard>> getCards() {
-    // Use the RestTemplate to call another service
-    List<Flashcard> all = this.restTemplate.getForObject("http://localhost:8081/flashcard", List.class);
+    List<Flashcard> all = this.restTemplate.getForObject("http://localhost:8080/flashcard", List.class);
 
     if(all.isEmpty()) {
       return ResponseEntity.noContent().build();
@@ -93,10 +74,131 @@ We accomplish this with RestTemplate. Update the `QuizController` in the quiz-se
   }
 ```
 
-Now when we send a GET request to `localhost:8080/quiz/cards` we get the expected response.
+Now we can send a GET request to `localhost:8080/quiz/cards` or `localhost:8080/flashcard` and they both provide the same response, as expected.
+
+But we still have the issue of needing to update our gateway-service every time each of our services change location. Additionally, it's a bit inconvenient that our RestTemplate has to send a request first to the gateway, which will then be redirected back to the flashcard-service. It would be much more efficient if our services could dynamically discover each other and directly communicate as needed.
+
+This is where Consul comes in.
+
+## Step 3: Run Consul Agent
+
+Run a Consul Agent locally with docker (Default port is 8500) with:
+`docker run -d --name consul -p 8500:8500 consul`
+
+If you do not have docker, you can download consul manually [here](https://www.consul.io/downloads).
+You will need to extract the zip folder, which only contains a single file: `consul.exe`.
+Open Git Bash in the same folder as the `consul.exe` file and run it with:
+`./consul.exe agent -server -bootstrap-expect=1 -data-dir=consul-data -ui -bind=$(ipconfig | grep 'IPv4' | grep -Eo '192.168.*' | head -1)`
+
+This command will run the agent inside Git Bash by binding it to one of your IPv4 addresses (if you have multiple).
+
+You can check if it is available by navigating to `http://localhost:8500/ui` in your browser.
+
+![Spring Cloud Consul UI](../images/ConsulAgentUI.PNG)
+
+## Step 4: Enable Service Discovery
+
+Perform the below steps for each of the following services:
+
+* quiz-service
+* flashcard-service
+* gateway-service
+
+1. Add the `Consul Discovery` starter dependency by right clicking each project and choosing `Spring > Edit Starters`
+
+2. Add the `@EnableDiscoveryClient` annotatation to each `@SpringBootApplication` class like below:
+
+```java
+@EnableDiscoveryClient
+@SpringBootApplication
+public class QuizServiceApplication {
+
+  public static void main(String[] args) {
+    SpringApplication.run(QuizServiceApplication.class, args);
+  }
+}
+```
+
+## Step 5: Update Gateway
+
+Now that we have a Consul Agent available, we will want to go back and allow our gateway-service to route to any instance of the services, instead of routing to a specific service on a specific port. Additionally, we would like to leverage the same with our RestTemplate in the `QuizController` of quiz-service.
+
+Update the `application.yml` file of gateway-service to the following:
+
+```yaml
+server:
+  port: 8080
+
+spring:
+  application.name: gateway
+  cloud:
+    gateway:
+      default-filters:
+      - PrefixPath=/
+      routes:
+      # ============================
+      - id: flashcard
+        uri: lb://flashcard
+        predicates:
+        - Path=/flashcard/**
+        filters:
+        - StripPrefix=1
+      # ============================
+      - id: quiz
+        uri: lb://quiz
+        predicates:
+        - Path=/quiz/**
+        filters:
+        - StripPrefix=1
+```
+
+By removing the `locahost` and adding the `lb` prefix, we are telling Spring Cloud Gateway to load balance across the instances of the services with the corresponding name.
+
+The additional filter here will remove the `/quiz` or `/flashcard` part of the URI as the request is being routed. This allows us to remove the extra `@RequestMapping` annotations in our quiz-service and flashcard-service.
+
+## Step 6: Update Other Services
+
+Update the `spring.application.name` properties in quiz-service and flashcard-service to the following:
+
+quiz-service:
+```properties
+spring.application.name=quiz
+```
+
+flashcard-service:
+```properties
+spring.application.name=flashcard
+```
+
+We also remove the `@RequestMapping` annotation at the top of our `QuizController` and `FlashcardController` classes since now Gateway will be handling the routing based on URI.
+
+Finally, the last step would be to modify the url that we have in our RestTemplate in `QuizController` to dynamically discover the location of the flashcard-service. Change the `QuizController` according to the following snippet:
+
+```java
+  @Bean
+  @LoadBalanced
+  RestTemplate restTemplate() {
+    return new RestTemplate();
+  }
+
+  @GetMapping("/cards")
+  public ResponseEntity<List<Flashcard>> getCards() {
+    List<Flashcard> all = this.restTemplate.getForObject("http://flashcard", List.class);
+
+    if(all.isEmpty()) {
+      return ResponseEntity.noContent().build();
+    }
+
+    return ResponseEntity.ok(all);
+  }
+```
+
+Note that we must add the `@LoadBalanaced` annotation to the RestTemplate because it needs some configuration for how to choose a specific instance of a service if Consul informs that there are multiple. The `@LoadBalanaced` annotation will use a client-side Load Balancer named [Ribbon](https://spring.io/guides/gs/client-side-load-balancing/) under the hood.
+
+Finally we can now send requests to `localhost:8080/quiz/cards` and obtain the same response as sending it to `localhost:8080/flashcard`. We are also able to update the ports of each service dynamically without needing to modify the Controllers further.
 
 ## Summary
 
-We have extracted smaller services from our monolithic application and turned them into a microservices application. From there, we created interservice communication through the use of RestTemplate.
+We have added an API Gateway with Spring Cloud Gateway and Service Discovery with Spring Cloud Consul to ease further expansion of our application. From here we will be able to horizontally scale each of our services independently without impacting the codebases. Additionally, adding extra services to our microservices application is as simple as registering that new service with Consul with a single annotation.
 
-The next issue to tackle in [Phase 2](../phase2) is keeping track of our many different services using Service Discovery and API Gateway with Consul and Spring Cloud Gateway.
+Next in [Phase 3](../phase3), we will look at addressing a lack of fallbacks in case one of our services is unavailable. As of now, if flashcard-service is unavailable, then our quiz-service will throw an exception when a request is sent to `localhost:8080/quiz/cards`. We would prefer to allow our quiz-service to gracefully respond in the event of another service's failure.
