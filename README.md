@@ -1,244 +1,225 @@
-# Phase 4: Centralized Configuration
+# Phase 5: Eventual Consistency
 
-In this phase we will address the growing problem of distributed configuration. We are seeeing that becomes more inconvenient to track all of the configuration for our microservice application. Before our architecture expands too far, we will leverage Centralized Configuration with [Spring Cloud Config](https://spring.io/guides/gs/centralized-configuration/). This will allow us to create a GitHub repository to house all of our configuration. From there, we will create a config-service that will inject the configuration into our services at runtime.
+In this phase we will leverage [Apache Kafka](https://kafka.apache.org/intro) as a message broker to achieve eventual consistency for the multiple instances of our flashcard-service. Apache Kafka will allow us to setup topics for each of our services. Each service will be both a consumer and producer, so that every instance of the service can both send and receive messages to/from other instances. In this example we will be achieving eventual consistency across instances of a single domain, but we can also achieve it cross-domain as well.
 
 The end result of this phase will be provided for comparison.
 
 ### Prerequisites
 
-You will need an account on any Git Repository Service, such as [GitHub](https://github.com/) or [GitLab](https://gitlab.com/).
+* Download [Apache Kafka](https://www.apache.org/dyn/closer.cgi?path=/kafka/2.5.0/kafka_2.12-2.5.0.tgz)
 
-## Step 1: Create Configuration Repository
+![Download Kafka Image](../images/KafkaDownload.PNG)
 
-If we want to centralize our configuration, then we need to store it all in a single location, accessible in the cloud. A perfect solution for this is a Git Repository. Any Git Repository will do, but in this demo, we will be using GitHub.
+* Extract Archive to Documents Folder
+  * Will need to extract twice
+* Rename folder to just `kafka`
 
-Create a new Git Repository. You may name it whatever you wish, but ours will simply be named `config`. It is located [here](https://github.com/IkenoXamos/config-2).
+![Extract Kafka Image](../images/KafkaExtracted.PNG)
 
-Normally, we would clone this Git Repository to update the configuration locally, but for this demonstration, we will just modify the repository through GitHub's UI.
+## Step 1: Start Zookeeper and Kafka
 
-## Step 2: Copy configuration
+1. Open 2 separate PowerShell Windows in the `kafka/bin/windows/` folder
+  * Most systems can Shift Right Click in a folder to open PowerShell
 
-Now we need to make sure that our Config Repository has all of the same configuration that our applications already have. Click on `Add file > Create new file` on GitHub, and create a file named `flashcard.properties`. Then enter the contents according to the below snippet:
+2. Run `.\zookeeper-server-start.bat ..\..\config\zookeeper.properties` in the first PowerShell Window
+
+3. Run `.\kafka-server-start.bat ..\..\config\server.properties` in the second PowerShell Window
+
+Note: Make sure to leave *both* PowerShell Windows open
+
+The kafka server will be started at `localhost:9092`
+
+## Step 2: Add Kafka Dependency
+
+Edit the starters for both flashcard-service and flashcard-service2 and add the `Spring for Apache Kafka` Dependency
+
+## Step 3: Configure Properties
+
+Add the below snippet to the `flashcard.properties` file in the Centralized Configuration Repository:
 
 ```properties
-spring.application.name=flashcard
+# Configure Kafka Consumer
+spring.kafka.consumer.bootstrap-servers=localhost:9092
+spring.kafka.consumer.group-id=group-id
+spring.kafka.consumer.auto-offset-reset=earliest
+spring.kafka.consumer.properties.spring.json.trusted.packages=*
+spring.kafka.consumer.key-deserializer=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.JsonDeserializer
 
-# Database Credentials
-spring.datasource.url=jdbc:h2:mem:memdb
-spring.datasource.username=sa
-spring.datasource.password=password
-spring.h2.console.enabled=true
-
-# JPA Settings
-spring.jpa.show-sql=false
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# Configure Kafka Producer
+spring.kafka.producer.bootstrap-servers=localhost:9092
+spring.kafka.producer.key-serializer=org.apache.kafka.common.serialization.StringSerializer
+spring.kafka.producer.value-serializer=org.springframework.kafka.support.serializer.JsonSerializer
 ```
 
-It is the same information as our `application.properties`. We should heavily consider not including the database credentials here, as this exposes our username and password publicly. However, since we are only using an in-memory database, we include it here.
+## Step 4: Create Flashcard Topic
 
-Note that we **do not** include the `server.port` property here. This is because for this demonstration, we have a flashcard-service and a flashcard-service2, which need to have different ports. If we included that property here, it would override our changed port. This is something we would do once we containerize our services. At that point, having the same port internal to each docker container is good design.
+In order to send/receive messages, there must be a topic. This can be created manually.
 
-Then perform the same process for each of:
+Open a *third* PowerShell Window in the same folder as Step 1.
 
-* `quiz.properties`
-* `gateway.yml`
+Run `.\kafka-topics.bat --create --zookeeper localhost:2181 --topic flashcard --replication-factor 1 --partitions 1`
 
-`quiz.properties`:
-```properties
-server.port=8090
-spring.application.name=quiz
+## Step 5: Create FlashcardChangeEvent
 
-# Database Credentials
-spring.datasource.url=jdbc:h2:mem:memdb
-spring.datasource.username=sa
-spring.datasource.password=password
-spring.h2.console.enabled=true
+In order to send/reveive concise messages, we will create a `FlashcardChangeEvent` class that will contain the timestamp, operation, and corresponding Flashcard that is relevant to the message. This will allow us to identify messages based on the hashcode of the event object. We can track the events and prevent 1 instance from re-processing the message that it just sent out.
 
-# JPA Settings
-spring.jpa.show-sql=false
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
-```
+Perform the following in flashcard-service and then copy the files into flashcard-service2:
 
-`gateway.yml`:
-```yaml
-server:
-  port: 8080
+1. Create a `com.revature.events` package
+2. Create an Enum called `Operation` and a class called `FlashcardChangeEvent` according to the below snippets:
 
-spring:
-  application.name: gateway
-  cloud:
-    gateway:
-      default-filters:
-      - PrefixPath=/
-      routes:
-      # ============================
-      - id: flashcard
-        uri: lb://flashcard
-        predicates:
-        - Path=/flashcard/**
-        filters:
-        - StripPrefix=1
-        - name: CircuitBreaker
-          args:
-            name: flashcard-fallback
-            fallbackUri: forward:/fallback/flashcard
-      # ============================
-      - id: quiz
-        uri: lb://quiz
-        predicates:
-        - Path=/quiz/**
-        filters:
-        - StripPrefix=1
-```
-
-Note: We **do** have the `server.port` property for these services.
-
-## Step 3: Create Config Service
-
-Now that we have a centralized repository with our configuration, we just need to create our config-service. This service will be responsible for injecting that configuration into our other services.
-
-Create a new Service named `config-service` with the following Spring Starter Dependencies:
-
-* Spring Boot DevTools
-* Spring Boot Actuator
-* Consul Discovery
-* Config Server
-
-Update the `ConfigServiceApplication` according to the below snippet:
-
+Operation:
 ```java
-@EnableDiscoveryClient
-@EnableConfigServer
-@SpringBootApplication
-public class ConfigServiceApplication {
+public enum Operation {
+  CREATE, UPDATE, DELETE
+}
+```
 
-  public static void main(String[] args) {
-    SpringApplication.run(ConfigServiceApplication.class, args);
+FlashcardChangeEvent:
+```java
+@Getter @Setter @NoArgsConstructor @AllArgsConstructor @EqualsAndHashCode @ToString
+public class FlashcardChangeEvent {
+
+  private Flashcard flashcard;
+  private Operation operation;
+  private LocalDateTime timestamp;
+}
+```
+
+## Step 6: Create MessageService
+
+We want to create a class that will manage sending and receiving messages according to the operation. We will create a `MessageService` class in the `com.revature.services` package.
+
+MessageService:
+```java
+@Service
+public class MessageService {
+
+  private static Set<Integer> eventCache = new HashSet<>();
+
+  @Autowired
+  private FlashcardRepository flashcardDao;
+
+  @Autowired
+  private KafkaTemplate<String, FlashcardChangeEvent> kt;
+
+  public void triggerEvent(FlashcardChangeEvent event) {
+    eventCache.add(event.hashCode());
+
+    kt.send("flashcard", event);
+  }
+
+  @KafkaListener(topics = "flashcard")
+  public void processEvent(FlashcardChangeEvent event) {
+    if(eventCache.contains(event.hashCode())) {
+      eventCache.remove(event.hashCode());
+      return;
+    }
+
+    switch(event.getOperation()) {
+    case CREATE:
+    case UPDATE:
+      flashcardDao.save(event.getFlashcard());
+      break;
+    case DELETE:
+      flashcardDao.delete(event.getFlashcard());
+      break;
+    }
   }
 }
 ```
 
-Update the `application.properties` file to be similar to the below:
+## Step 7: Leverage MessageService
 
-```properties
-server.port=8888
-spring.application.name=config
+Now that we have a service to handle all of the logic for sending and receiving messages, we will update out `FlashcardController` to leverage these.
 
-# Configure Git Repo for Centralized Configuration
-spring.cloud.config.server.git.uri=https://github.com/IkenoXamos/config-2
-```
-
-Note: Port 8888 is the default port for Cloud Config Servers and the git URI should be for the repository you created in Step 1
-
-## Step 4: Update Other Services
-Now we need to add the `Config Client` Spring Starter Dependency to the following services:
-
-* `quiz-service`
-* `flashcard-service`
-* `flashcard-service2`
-* `gateway-service`
-
-At this point we no longer need most of the configuration in the above services. Update each of their `application.properties` or `application.yml` to the below snippets:
-
-quiz-service:
-```properties
-spring.application.name=quiz
-spring.cloud.config.discovery.enabled=true
-spring.cloud.config.discovery.serviceId=config
-```
-
-flashcard-service:
-```properties
-server.port=8089
-spring.application.name=flashcard
-spring.cloud.config.discovery.enabled=true
-spring.cloud.config.discovery.serviceId=config
-```
-
-flashcard-service2:
-```properties
-server.port=8088
-spring.application.name=flashcard
-spring.cloud.config.discovery.enabled=true
-spring.cloud.config.discovery.serviceId=config
-```
-
-gateway-service:
-```yaml
-spring.application.name: gateway
-spring.cloud.config.discovery.enabled: true
-spring.cloud.config.discovery.serviceId: config
-```
-
-These configuration tell each service that the Config Server can be found with Consul named config. Only the 2 flashcard-services have the server.port property included due to the manner in which we are demonstrating multiple instances. Normally those properties are not necessary.
-
-## Step 5: Launch Services
-
-We should now launch of all our applications. Note that the services should eventually run successfully regardless of order, but a proper order can order be helpful for a smooth launch.
-
-1. config-service
-2. flashcard-service
-3. flashcard-service2
-4. quiz-service
-5. gateway-service
-
-Our services will receive their configuration, such as port, from the config-service when they initially launch.
-
-## Step 6: Dynamic Configuration
-
-We can create our own properties in the configuration repository and use them in our services. To demonstrate this, we will create a `message` property for the quiz-service and return that property from a `/message` endpoint.
-
-We'll start off by creating a `MessageController` class in the `com.revature.controllers` package of quiz-service according to the below snippet:
+Update the `FlashcardController` according to the below snippet:
 
 ```java
-@RestController
-@RequestMapping("/message")
-@RefreshScope
-public class MessageController {
+@Autowired
+MessageService messageService;
 
-  @Value("${message}")
-  private String message;
+  @PostMapping
+  public ResponseEntity<Flashcard> insert(@RequestBody Flashcard flashcard) {
+    int id = flashcard.getId();
 
-  @GetMapping
-  public String getMessage() {
-    return message;
+    if(id != 0) {
+      return ResponseEntity.badRequest().build();
+    }
+
+    messageService.triggerEvent(
+        new FlashcardChangeEvent(flashcard, Operation.CREATE, LocalDateTime.now()));
+
+    flashcardDao.save(flashcard);
+    return ResponseEntity.status(201).body(flashcard);
   }
-}
-```
-Note that `@Value` annotation was imported from `org.springframework.beans.factory.annotation`
 
-The `@RefreshScope` annotation will refresh the configuration for this Controller without having to restart the service.
+  @DeleteMapping("/{id}")
+  public ResponseEntity<Flashcard> delete(@PathVariable("id") int id) {
+    Optional<Flashcard> option = flashcardDao.findById(id);
 
-The `@Value` annotation will inject the value of the corresponding property into the field. This allows us to return the property at our `/message` endpoint.
+    if(option.isPresent()) {
+      messageService.triggerEvent(
+          new FlashcardChangeEvent(option.get(), Operation.DELETE, LocalDateTime.now()));
 
-Since we do not have the `message` property in our configuration yet, we must add it in order to allow the quiz-service to successfully launch.
+      flashcardDao.delete(option.get());
+      return ResponseEntity.accepted().body(option.get());
+    }
 
-Additionally, we need to expose the actuator refresh endpoint `/actuator/refresh`. We send a POST request to this endpoint to tell the service to refresh its configuration.
-
-In the Config Repository, edit the `quiz.properties` file to include the following:
-
-```properties
-# Actuator Endpoints
-management.endpoints.web.exposure.include=*
-
-# Dynamic Configuration
-message=Hello World!
+    return ResponseEntity.notFound().build();
+  }
 ```
 
-Now when we send a GET request to `http://localhost:8080/quiz/message`, we receive the response `Hello World!` as expected.
+Now when you launch all of the microservices, you will see that the 2 instances of the flashcard-service will no longer be out of sync. When you send a POST request to `localhost:8080/flashcard` to create a new Flashcard, that operation will be sent to the other instance to be replicated.
 
-Now if we change the value of the property in the Config Repository, our application will dynamically provide the new message without needing to restart!
+When you now send multiple GET requests to `localhost:8080/flashcard`, you should see that they will *eventually* synchronize (it is actually very quick).
 
-To see this, change the message property to something else, such as `Hello World, this was updated dynamically! Isn't that neat?`.
+## Troubleshooting
 
-After approximately 30 seconds, the config-service should obtain the new configuration, which will then be injected into the quiz-service. Then the quiz-service will update its Spring Beans when we send a POST request to `http://localhost:8080/quiz/actuator/refresh`.
+Note: The Kafka Server might stop with an error similar to:
 
-You should see the response change from `Hello World!` to `Hello World, this was updated dynamically! Isn't that neat?`.
+```log
+[2020-07-12 19:50:38,024] WARN [ReplicaManager broker=0] Stopping serving replicas in dir C:\tmp\kafka-logs (kafka.server.ReplicaManager)
+[2020-07-12 19:50:38,073] ERROR Failed to clean up log for __consumer_offsets-13 in dir C:\tmp\kafka-logs due to IOException (kafka.server.LogDirFailureChannel)
+java.nio.file.FileSystemException: C:\tmp\kafka-logs\__consumer_offsets-13\00000000000000000000.timeindex.cleaned: The process cannot access the file because it is being used by another process.
+
+        at sun.nio.fs.WindowsException.translateToIOException(WindowsException.java:86)
+        at sun.nio.fs.WindowsException.rethrowAsIOException(WindowsException.java:97)
+        at sun.nio.fs.WindowsException.rethrowAsIOException(WindowsException.java:102)
+        at sun.nio.fs.WindowsFileSystemProvider.implDelete(WindowsFileSystemProvider.java:269)
+        at sun.nio.fs.AbstractFileSystemProvider.deleteIfExists(AbstractFileSystemProvider.java:108)
+        at java.nio.file.Files.deleteIfExists(Files.java:1165)
+        at kafka.log.Log$.deleteFileIfExists(Log.scala:2546)
+        at kafka.log.LogSegment$.deleteIfExists(LogSegment.scala:669)
+        at kafka.log.LogCleaner$.createNewCleanedSegment(LogCleaner.scala:435)
+        at kafka.log.Cleaner.cleanSegments(LogCleaner.scala:547)
+        at kafka.log.Cleaner.$anonfun$doClean$6(LogCleaner.scala:519)
+        at kafka.log.Cleaner.doClean(LogCleaner.scala:518)
+        at kafka.log.Cleaner.clean(LogCleaner.scala:492)
+        at kafka.log.LogCleaner$CleanerThread.cleanLog(LogCleaner.scala:361)
+        at kafka.log.LogCleaner$CleanerThread.cleanFilthiestLog(LogCleaner.scala:334)
+        at kafka.log.LogCleaner$CleanerThread.tryCleanFilthiestLog(LogCleaner.scala:314)
+        at kafka.log.LogCleaner$CleanerThread.doWork(LogCleaner.scala:303)
+        at kafka.utils.ShutdownableThread.run(ShutdownableThread.scala:96)
+[2020-07-12 19:50:38,076] WARN [ReplicaManager broker=0] Broker 0 stopped fetcher for partitions  and stopped moving logs for partitions  because they are in the failed log directory C:\tmp\kafka-logs. (kafka.server.ReplicaManager)
+[2020-07-12 19:50:38,080] WARN Stopping serving logs in dir C:\tmp\kafka-logs (kafka.log.LogManager)
+[2020-07-12 19:50:38,089] ERROR Shutdown broker because all log dirs in C:\tmp\kafka-logs have failed (kafka.log.LogManager)
+```
+
+If this occurs, perform the following:
+
+1. Edit the `server.properties` file in the `kafka/config/` folder
+  * Change the `log.dirs` property to something else, such as `log.dirs=\tmp\kafka\kafka-test-logs`
+2. Restart kafka server with `.\kafka-server-start.bat ..\..\config\server.properties`
+
+
+You may also occasionally want to restart both Zookeeper and Kafka. In which case, first shut down Kafka with `CTRL - C` in the PowerShell Window that is running Kafka, and then shutdown Zookeeper in the same way. Then restart them with the commands used in Step 1.
 
 ## Summary
 
-We have increased the maintainability of our application's codebase by centralizing the various configuration files into a single Git Repository. Now we will have centralized versioning for every microservice configuration, with the new ability to dynamically refresh the configuration at runtime.
+We have solved the long-standing issue of data consistency that arose with our distributed databases. We could have changed the H2 databases in the flashcard-services to both use the same database to avoid this problem entirely. But properly achieving eventual consistency allows for efficiently scaling the number of GET requests you can process at any given time.
 
-The final issue to tackle in [Phase 5](../phase5) is to resolve database consistency by using a Messaging Queue to synchronize all instances of a service.
+Instead of purchasing larger servers for our databases to process more requests per second, we can instead horizontally scale our databases.
+
+Keep in mind that eventual consistency here is performing data replication, so if your particular use-case requires a lot of creation/modification of data, you might not find as much benefit in eventual consistency.
